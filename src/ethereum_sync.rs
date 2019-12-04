@@ -49,6 +49,11 @@ impl HeadersSync {
 			.unwrap_or(false)
 	}
 
+	/// Returns synchronization status.
+	pub fn status(&self) -> (&Option<HeaderId>, &Option<u64>) {
+		(&self.best_header, &self.target_header_number)
+	}
+
 	/// Returns reference to the headers queue.
 	pub fn headers(&self) -> &QueuedHeaders {
 		&self.headers
@@ -120,10 +125,6 @@ impl HeadersSync {
 
 		// finally remember the best header itself
 		self.best_header = Some(best_header);
-	}
-
-	/// Synchronization tick (called periodically).
-	pub fn tick(&mut self) {
 	}
 }
 

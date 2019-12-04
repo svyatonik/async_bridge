@@ -23,12 +23,43 @@ fn interval(timeout_ms: u64) -> impl futures::Stream<Item = ()> {
 	futures::stream::unfold((), move |_| async move { delay(timeout_ms).await; Some(((), ())) })
 }
 
+async fn exit_future() {
+	futures::future::pending().await
+}
+
+fn print_progress(
+	progress_context: (std::time::Instant, Option<u64>, Option<u64>),
+	eth_sync: &crate::ethereum_sync::HeadersSync,
+) -> (std::time::Instant, Option<u64>, Option<u64>) {
+	let (prev_time, prev_best_header, prev_target_header) = progress_context;
+	let now_time = std::time::Instant::now();
+	let (now_best_header, now_target_header) = eth_sync.status();
+
+	let need_update = now_time - prev_time > std::time::Duration::from_secs(10)
+		|| match (prev_best_header, now_best_header) {
+			(Some(prev_best_header), Some(now_best_header)) => now_best_header.0.saturating_sub(prev_best_header) > 10,
+			_ => false,
+		};
+	if !need_update {
+		return (prev_time, prev_best_header, prev_target_header);
+	}
+
+	log::info!(
+		target: "bridge",
+		"Synced {:?} of {:?} headers",
+		now_best_header.map(|id| id.0),
+		now_target_header,
+	);
+	(now_time, now_best_header.clone().map(|id| id.0), *now_target_header)
+}
+
 fn main() {
 	use futures::{future::FutureExt, stream::StreamExt};
 
 	env_logger::init();
 
 	let mut local_pool = futures::executor::LocalPool::new();
+	let mut progress_context = (std::time::Instant::now(), None, None);
 
 	local_pool.run_until(async move {
 		let mut eth_sync = crate::ethereum_sync::HeadersSync::default();
@@ -49,7 +80,7 @@ fn main() {
 		let sub_submit_header_future = futures::future::Fuse::terminated();
 		let sub_tick_stream = interval(1000).fuse();
 
-		let exit_future = delay(10 * 1000).fuse();
+		let exit_future = exit_future().fuse();
 
 		futures::pin_mut!(
 			eth_best_block_number_future,
@@ -179,12 +210,13 @@ fn main() {
 					}
 				},
 				_ = exit_future => {
-					println!("stopping");
+					println!("stopping (exit future signalled)");
 					break;
 				},
 			}
 
-			eth_sync.tick();
+			// print progress
+			progress_context = print_progress(progress_context, &eth_sync);
 
 			// if client is available: wait, or call Substrate RPC methods
 			if let Some(sub_client) = sub_maybe_client.take() {
