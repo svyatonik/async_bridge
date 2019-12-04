@@ -1,8 +1,12 @@
-pub use web3::types::{H256, U128, U64};
+pub use web3::types::{Bytes, H256, U128, U64};
 
 /// When header is just received from the Ethereum node, we check that it has
 /// both number and hash fields filled.
 pub const HEADER_ID_PROOF: &'static str = "checked on retrieval; qed";
+
+/// When receipt is just received from the Ethereum node, we check that it has
+/// gas_used field filled.
+pub const RECEIPT_GAS_USED_PROOF: &'static str = "checked on retrieval; qed";
 
 /// Ethereum header type.
 pub type Header = web3::types::Block<()>;
@@ -44,7 +48,7 @@ pub enum HeaderStatus {
 	Synced,
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 #[cfg_attr(test, derive(PartialEq))]
 pub struct QueuedHeader {
 	header: Header,
@@ -75,9 +79,9 @@ impl QueuedHeader {
 		&self.header
 	}
 
-	/// Returns reference to associated transactions receipts.
-	pub fn receipts(&self) -> &Option<Vec<Receipt>> {
-		&self.receipts
+	/// Extract header and receipts from self.
+	pub fn extract(self) -> (Header, Option<Vec<Receipt>>) {
+		(self.header, self.receipts)
 	}
 
 	/// Set associated transaction receipts.

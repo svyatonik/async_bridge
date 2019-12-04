@@ -5,6 +5,7 @@ mod ethereum_headers;
 mod ethereum_sync;
 mod ethereum_types;
 mod substrate_client;
+mod substrate_types;
 
 use crate::ethereum_types::HeaderStatus as EthereumHeaderStatus;
 
@@ -149,7 +150,7 @@ fn main() {
 					sub_maybe_client = Some(sub_client);
 
 					match sub_submit_header_result {
-						Ok(submitted_header) => eth_sync.headers_mut().header_submitted(&submitted_header),
+						Ok((_transction_hash, submitted_header)) => eth_sync.headers_mut().header_submitted(&submitted_header),
 						Err(error) => log::error!(
 							target: "bridge",
 							"Error submitting header to Substrate node: {:?}",
@@ -203,8 +204,9 @@ fn main() {
 						header_for_receipts_check,
 					);
 
+					let header = header_for_receipts_check.clone();
 					sub_receipts_check_future.set(
-						substrate_client::ethereum_receipts_required(sub_client, header_for_receipts_check.id()).fuse()
+						substrate_client::ethereum_receipts_required(sub_client, header).fuse()
 					);
 				} else if let Some(header_for_existence_status) = eth_sync.headers().header(EthereumHeaderStatus::MaybeOrphan) {
 					// for MaybeOrphan we actually ask for parent' header existence
@@ -227,10 +229,9 @@ fn main() {
 						id,
 					);
 
-					let receipts = header.receipts().clone();
-					let header = header.header().clone();
+					let header = header.clone();
 					sub_submit_header_future.set(
-						substrate_client::submit_ethereum_header(sub_client, header, receipts).fuse(),
+						substrate_client::submit_ethereum_header(sub_client, header).fuse(),
 					);
 				} else {
 					sub_maybe_client = Some(sub_client);

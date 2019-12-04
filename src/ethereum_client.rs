@@ -27,6 +27,8 @@ pub enum Error {
 	ResponseParseFailed(serde_json::Error),
 	/// We have received header with missing number and hash fields.
 	IncompleteHeader,
+	/// We have received receipt with missing gas_used field.
+	IncompleteReceipt,
 }
 
 /// Returns client that is able to call RPCs on Ethereum node.
@@ -139,13 +141,19 @@ async fn block_transaction(
 
 /// Retrieve transaction receipt by transaction hash.
 async fn transaction_receipt(client: Client, hash: H256) -> (Client, Result<Receipt, Error>) {
-	call_rpc(
+	let (client, receipt) = call_rpc::<Receipt>(
 		client,
 		"eth_getTransactionReceipt",
 		Params::Array(vec![
 			to_value(hash).expect(HASH_SERIALIZATION_PROOF),
 		]),
-	).await
+	).await;
+	(client, receipt.and_then(|receipt| {
+		match receipt.gas_used.is_some() {
+			true => Ok(receipt),
+			false => Err(Error::IncompleteReceipt),
+		}
+	}))
 }
 
 /// Calls RPC on Ethereum node.

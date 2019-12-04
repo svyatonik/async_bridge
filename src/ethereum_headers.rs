@@ -193,18 +193,20 @@ impl QueuedHeaders {
 			&mut self.known_headers,
 			destination_status,
 			&id,
+			|header| header,
 		);
 	}
 
 	/// Receive transactions receipts from Ethereum node.
 	pub fn receipts_response(&mut self, id: &HeaderId, receipts: Vec<Receipt>) {
-		let header = match remove_header(&mut self.receipts, id) {
-			Some(header) => header,
-			None => return,
-		};
-
-		self.known_headers.entry(id.0).or_default().insert(id.1, HeaderStatus::Ready);
-		insert_header(&mut self.ready, *id, header.set_receipts(receipts));
+		move_header(
+			&mut self.receipts,
+			&mut self.ready,
+			&mut self.known_headers,
+			HeaderStatus::Ready,
+			id,
+			|header| header.set_receipts(receipts),
+		);
 	}
 
 	/// When header is submitted to Substrate node.
@@ -240,14 +242,22 @@ fn move_header(
 	known_headers: &mut KnownHeaders,
 	destination_status: HeaderStatus,
 	id: &HeaderId,
+	prepare: impl FnOnce(QueuedHeader) -> QueuedHeader,
 ) {
 	let header = match remove_header(source_queue, id) {
-		Some(header) => header,
+		Some(header) => prepare(header),
 		None => return,
 	};
 
 	known_headers.entry(id.0).or_default().insert(id.1, destination_status);
 	destination_queue.entry(id.0).or_default().insert(id.1, header);
+
+	log::debug!(
+		target: "bridge",
+		"Ethereum header {:?} is now {:?}",
+		id,
+		destination_status,
+	);
 }
 
 /// Move all descendant headers from the source to destination queue.
@@ -283,6 +293,13 @@ fn move_header_descendants(
 					let header_to_move_id = header_to_move.id();
 					known_headers.entry(header_to_move_id.0).or_default().insert(header_to_move_id.1, destination_status);
 					headers_to_move.push((header_to_move_id, header_to_move));
+
+					log::debug!(
+						target: "bridge",
+						"Ethereum header {:?} is now {:?}",
+						header_to_move_id,
+						destination_status,
+					);
 				}
 			}
 
@@ -317,6 +334,8 @@ fn change_status_to_submitted(
 	match known_headers.entry(id.0) {
 		BTreeMapEntry::Occupied(mut entry) => match entry.get_mut().entry(id.1) {
 			HashMapEntry::Occupied(mut entry) => {
+				log::debug!(target: "bridge", "Ethereum header {:?} is now submitted", id);
+
 				*headers_in_submit_status += 1;
 				*entry.get_mut() = HeaderStatus::Submitted;
 			},
@@ -337,6 +356,7 @@ fn change_status_to_synced(
 		*headers_in_submit_status -= 1;
 	}
 
+	log::debug!(target: "bridge", "Ethereum header {:?} is now synced", id);
 	*previous_status = HeaderStatus::Synced;
 }
 
