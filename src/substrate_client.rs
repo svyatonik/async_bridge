@@ -91,17 +91,22 @@ pub async fn submit_ethereum_header(
 	header: QueuedEthereumHeader,
 ) -> (Client, Result<(TransactionHash, EthereumHeaderId), Error>) {
 	let id = header.id();
-	let (header, receipts) = header.extract();
-	let call = node_runtime::Call::BridgeEthPoa(
-		node_runtime::BridgeEthPoaCall::import_header(
-			into_substrate_ethereum_header(header),
-			into_substrate_ethereum_receipts(receipts),
-		),
-	);
-	let transaction = node_runtime::UncheckedExtrinsic {
-		signature: None,
-		function: call,
+	let (client, genesis_hash) = block_hash_by_number(client, 0).await;
+	let genesis_hash = match genesis_hash {
+		Ok(genesis_hash) => genesis_hash,
+		Err(err) => return (client, Err(err)),
 	};
+	let (client, nonce) = next_account_index(client, sp_keyring::AccountKeyring::Alice.to_account_id()).await;
+	let nonce = match nonce {
+		Ok(nonce) => nonce,
+		Err(err) => return (client, Err(err)),
+	};
+	let transaction = create_transaction(
+		header,
+		sp_keyring::AccountKeyring::Alice,
+		nonce,
+		genesis_hash,
+	);
 	let encoded_transaction = transaction.encode();
 	let (client, transaction_hash) = call_rpc(
 		client,
@@ -113,7 +118,35 @@ pub async fn submit_ethereum_header(
 	(client, transaction_hash.map(|transaction_hash| (transaction_hash, id)))
 }
 
-/// Calls RPC on Substrate node.
+/// Get Substrate block hash by its number.
+async fn block_hash_by_number(client: Client, number: u64) -> (Client, Result<H256, Error>) {
+	call_rpc(
+		client,
+		"chain_getBlockHash",
+		Params::Array(vec![
+			to_value(number).unwrap(),
+		]),
+	).await
+}
+
+/// Get substrate account nonce.
+async fn next_account_index(
+	client: Client,
+	account: node_primitives::AccountId,
+) -> (Client, Result<node_primitives::Index, Error>) {
+	use sp_core::crypto::Ss58Codec;
+
+	let (client, index) = call_rpc_u64(
+		client,
+		"system_accountNextIndex",
+		Params::Array(vec![
+			to_value(account.to_ss58check()).unwrap(),
+		]),
+	).await;
+	(client, index.map(|index| index as _))
+}
+
+/// Calls RPC on Substrate node that returns Bytes.
 async fn call_rpc<T: Decode>(
 	mut client: Client,
 	method: &'static str,
@@ -143,67 +176,89 @@ async fn call_rpc<T: Decode>(
 	(client, result)
 }
 
-/*
-use std::collections::HashMap;
-use crate::ethereum_types::{
-	HeaderId as EthereumHeaderId,
-	Header as EthereumHeader,
-	H256,
-	Receipt as EthereumReceipt,
-};
-
-/// Substrate client type.
-pub struct Client {
-	/// Best known Ethereum block.
-	best_ethereum_block: EthereumHeaderId,
-	/// All stored headers.
-	ethereum_headers: HashMap<H256, (EthereumHeader, Vec<EthereumReceipt>)>,
-}
-
-/// All possible errors that can occur during interacting with Substrate node.
-#[derive(Debug)]
-pub enum Error { }
-
-/// Returns client that is able to call RPCs on Substrate node.
-pub fn client() -> Client {
-	Client {
-		best_ethereum_block: EthereumHeaderId(0, "a3c565fc15c7478862d50ccd6561e3c06b24cc509bf388941c25ea985ce32cb9".parse().unwrap()),
-		ethereum_headers: std::collections::HashMap::new(),
-	}
-}
-
-/// Returns best Ethereum block that Substrate runtime knows of.
-pub async fn best_ethereum_block(client: Client) -> (Client, Result<EthereumHeaderId, Error>) {
-	let best_ethereum_block = client.best_ethereum_block.clone();
-	(client, Ok(best_ethereum_block))
-}
-
-/// Returns true if transactions receipts are required for Ethereum header submission.
-pub async fn ethereum_receipts_required(
-	client: Client,
-	id: EthereumHeaderId,
-) -> (Client, Result<(EthereumHeaderId, bool), Error>) {
-	(client, Ok((id, true)))
-}
-
-/// Returns true if Ethereum header is known to Substrate runtime.
-pub async fn ethereum_header_known(
-	client: Client,
-	id: EthereumHeaderId,
-) -> (Client, Result<(EthereumHeaderId, bool), Error>) {
-	let is_known_header = client.ethereum_headers.contains_key(&id.1);
-	(client, Ok((id, is_known_header)))
-}
-
-/// Submits Ethereum header to Substrate runtime.
-pub async fn submit_ethereum_header(
+/// Calls RPC on Substrate node that returns u64.
+async fn call_rpc_u64(
 	mut client: Client,
-	header: EthereumHeader,
-	receipts: Option<Vec<EthereumReceipt>>,
-) -> (Client, Result<EthereumHeaderId, Error>) {
-	let id = (&header).into();
-	client.best_ethereum_block = id;
-	client.ethereum_headers.insert(id.1, (header, receipts.unwrap()));
-	(client, Ok(id))
+	method: &'static str,
+	params: Params,
+) -> (Client, Result<u64, Error>) {
+	async fn do_call_rpc(
+		client: &mut Client,
+		method: &'static str,
+		params: Params,
+	) -> Result<u64, Error> {
+		let request_id = client
+			.start_request(method, params)
+			.await
+			.map_err(Error::StartRequestFailed)?;
+		// WARN: if there'll be need for executing >1 request at a time, we should avoid
+		// calling request_by_id
+		let response = client
+			.request_by_id(request_id)
+			.ok_or(Error::RequestNotFound)?
+			.await
+			.map_err(Error::ResponseRetrievalFailed)?;
+		response.as_u64().ok_or(Error::ResponseParseFailed)
+	}
+
+	let result = do_call_rpc(&mut client, method, params).await;
+	(client, result)
 }
-*/
+
+/// Create Substrate transaction for submitting Ethereum header.
+fn create_transaction(
+	header: QueuedEthereumHeader,
+	account: sp_keyring::AccountKeyring,
+	index: node_primitives::Index,
+//	signer: sp_core::sr25519::Pair,
+	genesis_hash: H256,
+) -> node_runtime::UncheckedExtrinsic {
+	use sp_core::crypto::Pair;
+	use sp_runtime::traits::IdentifyAccount;
+
+	let signer = account.pair();
+
+	let (header, receipts) = header.extract();
+
+	let function = node_runtime::Call::BridgeEthPoa(
+		node_runtime::BridgeEthPoaCall::import_header(
+			into_substrate_ethereum_header(header),
+			into_substrate_ethereum_receipts(receipts),
+		),
+	);
+
+	let extra = |i: node_primitives::Index, f: node_primitives::Balance| {
+		(
+			frame_system::CheckVersion::<node_runtime::Runtime>::new(),
+			frame_system::CheckGenesis::<node_runtime::Runtime>::new(),
+			frame_system::CheckEra::<node_runtime::Runtime>::from(sp_runtime::generic::Era::Immortal),
+			frame_system::CheckNonce::<node_runtime::Runtime>::from(i),
+			frame_system::CheckWeight::<node_runtime::Runtime>::new(),
+			pallet_transaction_payment::ChargeTransactionPayment::<node_runtime::Runtime>::from(f),
+			Default::default(),
+		)
+	};
+	let raw_payload = node_runtime::SignedPayload::from_raw(
+		function,
+		extra(index, 0),
+		(
+			198, // VERSION.spec_version as u32,
+			genesis_hash,
+			genesis_hash,
+			(),
+			(),
+			(),
+			(),
+		),
+	);
+	let signature = raw_payload.using_encoded(|payload| signer.sign(payload));
+	let signer: sp_runtime::MultiSigner = signer.public().into();
+	let (function, extra, _) = raw_payload.deconstruct();
+
+	node_runtime::UncheckedExtrinsic::new_signed(
+		function,
+		signer.into_account().into(),
+		signature.into(),
+		extra,
+	)
+}

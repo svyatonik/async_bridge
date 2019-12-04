@@ -201,7 +201,7 @@ fn main() {
 					log::debug!(
 						target: "bridge",
 						"Checking if header submission requires receipts: {:?}",
-						header_for_receipts_check,
+						header_for_receipts_check.id(),
 					);
 
 					let header = header_for_receipts_check.clone();
