@@ -56,7 +56,7 @@ pub async fn header_by_number(client: Client, number: u64) -> (Client, Result<He
 			to_value(false).expect(BOOL_SERIALIZATION_PROOF),
 		]),
 	).await;
-	(client, header.and_then(|header: Header| match header.number.is_none() && header.hash.is_none() {
+	(client, header.and_then(|header: Header| match header.number.is_some() && header.hash.is_some() {
 		true => Ok(header),
 		false => Err(Error::IncompleteHeader),
 	}))
