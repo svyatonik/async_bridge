@@ -9,7 +9,7 @@ pub const HEADER_ID_PROOF: &'static str = "checked on retrieval; qed";
 pub const RECEIPT_GAS_USED_PROOF: &'static str = "checked on retrieval; qed";
 
 /// Ethereum header type.
-pub type Header = web3::types::Block<()>;
+pub type Header = web3::types::Block<H256>;
 
 /// Ethereum transaction receipt type.
 pub type Receipt = web3::types::TransactionReceipt;
@@ -77,6 +77,11 @@ impl QueuedHeader {
 	/// Returns reference to header.
 	pub fn header(&self) -> &Header {
 		&self.header
+	}
+
+	/// Returns reference to transactions receipts.
+	pub fn receipts(&self) -> &Option<Vec<Receipt>> {
+		&self.receipts
 	}
 
 	/// Extract header and receipts from self.

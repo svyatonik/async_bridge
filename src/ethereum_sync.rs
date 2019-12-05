@@ -1,5 +1,7 @@
+use codec::Encode;
 use crate::ethereum_types::{HeaderId, HeaderStatus, QueuedHeader};
 use crate::ethereum_headers::QueuedHeaders;
+use crate::substrate_types::{into_substrate_ethereum_header, into_substrate_ethereum_receipts};
 
 /// Ethereum synchronization parameters.
 #[derive(Debug)]
@@ -8,13 +10,19 @@ pub struct HeadersSyncParams {
 	pub max_future_headers_to_download: usize,
 	/// Maximal number of active (we believe) submit header transactions.
 	pub max_headers_in_submitted_status: usize,
+	/// Maximal number of headers in single submit request.
+	pub max_headers_in_single_submit: usize,
+	/// Maximal total headers size in single submit request.
+	pub max_headers_size_in_single_submit: usize,
 }
 
 impl Default for HeadersSyncParams {
 	fn default() -> Self {
 		HeadersSyncParams {
 			max_future_headers_to_download: 128,
-			max_headers_in_submitted_status: 8,
+			max_headers_in_submitted_status: 128,
+			max_headers_in_single_submit: 32,
+			max_headers_size_in_single_submit: 131_072,
 		}
 	}
 }
@@ -91,18 +99,41 @@ impl HeadersSync {
 		Some(best_downloaded_number + 1)
 	}
 
-	/// Select header that needs to be submitted to the Substrate node.
-	pub fn select_header_to_submit(&self) -> Option<&QueuedHeader> {
-		if self.headers.headers_in_submit_status() >= self.params.max_headers_in_submitted_status {
-			return None;
-		}
+	/// Select headers that need to be submitted to the Substrate node.
+	pub fn select_headers_to_submit(&self) -> Option<Vec<&QueuedHeader>> {
+		let headers_in_submit_status = self.headers.headers_in_status(HeaderStatus::Submitted);
+		let headers_to_submit_count = self.params.max_headers_in_submitted_status
+			.checked_sub(headers_in_submit_status)?;
 
 		// TODO: submitting known (to Substrate) headers should not be penalized
 
 		// TODO: if there's long fork, the sync may stall, because we won't know if
 		// the side header has been accepted until reorg happens
 		// => there should be another mechanism to handle this
-		self.headers.header(HeaderStatus::Ready)
+
+		let mut total_size = 0;
+		let mut total_headers = 0;
+		self.headers.headers(HeaderStatus::Ready, |header| {
+			if total_headers == headers_to_submit_count {
+				return false;
+			}
+			if total_headers == self.params.max_headers_in_single_submit {
+				return false;
+			}
+
+			// TODO: we might use encoded result when header is submitted
+			let encoded_size = into_substrate_ethereum_header(header.header()).encode().len()
+				+ into_substrate_ethereum_receipts(header.receipts()).map(|receipts| receipts.encode().len())
+					.unwrap_or(0);
+			if total_headers != 0 && total_size + encoded_size > self.params.max_headers_size_in_single_submit {
+				return false;
+			}
+
+			total_size += encoded_size;
+			total_headers += 1;
+
+			true
+		})
 	}
 
 	/// Receive new target header number from the Ethereum node.

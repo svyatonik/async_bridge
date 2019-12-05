@@ -181,7 +181,7 @@ fn main() {
 					sub_maybe_client = Some(sub_client);
 
 					match sub_submit_header_result {
-						Ok((_transction_hash, submitted_header)) => eth_sync.headers_mut().header_submitted(&submitted_header),
+						Ok((_transction_hash, submitted_headers)) => eth_sync.headers_mut().headers_submitted(submitted_headers),
 						Err(error) => log::error!(
 							target: "bridge",
 							"Error submitting header to Substrate node: {:?}",
@@ -229,14 +229,14 @@ fn main() {
 				if sub_best_block_required {
 					log::debug!(target: "bridge", "Asking Substrate about best block");
 					sub_best_block_future.set(substrate_client::best_ethereum_block(sub_client).fuse());
-				} else if let Some(header_for_receipts_check) = eth_sync.headers().header(EthereumHeaderStatus::MaybeReceipts) {
+				} else if let Some(header) = eth_sync.headers().header(EthereumHeaderStatus::MaybeReceipts) {
 					log::debug!(
 						target: "bridge",
 						"Checking if header submission requires receipts: {:?}",
-						header_for_receipts_check.id(),
+						header.id(),
 					);
 
-					let header = header_for_receipts_check.clone();
+					let header = header.clone();
 					sub_receipts_check_future.set(
 						substrate_client::ethereum_receipts_required(sub_client, header).fuse()
 					);
@@ -253,17 +253,22 @@ fn main() {
 					sub_existence_status_future.set(
 						substrate_client::ethereum_header_known(sub_client, parent_id).fuse(),
 					);
-				} else if let Some(header) = eth_sync.select_header_to_submit() {
-					let id = header.id();
+				} else if let Some(headers) = eth_sync.select_headers_to_submit() {
+					let ids = match headers.len() {
+						1 => format!("{:?}", headers[0].id()),
+						2 => format!("[{:?}, {:?}]", headers[0].id(), headers[1].id()),
+						len => format!("[{:?} ... {:?}]", headers[0].id(), headers[len - 1].id()),
+					};
 					log::debug!(
 						target: "bridge",
-						"Submitting header to Substrate node: {:?}",
-						id,
+						"Submitting {} header(s) to Substrate node: {:?}",
+						headers.len(),
+						ids,
 					);
 
-					let header = header.clone();
+					let headers = headers.into_iter().cloned().collect();
 					sub_submit_header_future.set(
-						substrate_client::submit_ethereum_header(sub_client, header).fuse(),
+						substrate_client::submit_ethereum_headers(sub_client, headers).fuse(),
 					);
 				} else {
 					sub_maybe_client = Some(sub_client);

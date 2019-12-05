@@ -26,16 +26,25 @@ pub struct QueuedHeaders {
 	receipts: HeadersQueue,
 	/// Headers that are ready to be submitted to Substrate runtime.
 	ready: HeadersQueue,
+	/// Headers that are (we believe) are currently submitted to Substrate runtime by our,
+	/// not-yet mined transactions.
+	submitted: HeadersQueue,
 	/// Pointers to all headers that we ever seen and we believe we can touch in the future.
 	known_headers: KnownHeaders,
-	/// Number of headers that we believe are currently in the in-pool submit transactions.
-	headers_in_submit_status: usize,
 }
 
 impl QueuedHeaders {
-	/// Returns number of headers that we believe are currently in the in-pool submit transactions.
-	pub fn headers_in_submit_status(&self) -> usize {
-		self.headers_in_submit_status
+	/// Returns number of headers that are currently in given queue.
+	pub fn headers_in_status(&self, status: HeaderStatus) -> usize {
+		match status {
+			HeaderStatus::Unknown | HeaderStatus::Synced => return 0,
+			HeaderStatus::MaybeOrphan => self.maybe_orphan.values().fold(0, |total, headers| total + headers.len()),
+			HeaderStatus::Orphan => self.orphan.values().fold(0, |total, headers| total + headers.len()),
+			HeaderStatus::MaybeReceipts => self.maybe_receipts.values().fold(0, |total, headers| total + headers.len()),
+			HeaderStatus::Receipts => self.receipts.values().fold(0, |total, headers| total + headers.len()),
+			HeaderStatus::Ready => self.ready.values().fold(0, |total, headers| total + headers.len()),
+			HeaderStatus::Submitted => self.submitted.values().fold(0, |total, headers| total + headers.len()),
+		}
 	}
 
 	/// Returns number of headers that are currently in the queue.
@@ -81,8 +90,21 @@ impl QueuedHeaders {
 			HeaderStatus::Orphan => oldest_header(&self.orphan),
 			HeaderStatus::MaybeReceipts => oldest_header(&self.maybe_receipts),
 			HeaderStatus::Receipts => oldest_header(&self.receipts),
-			HeaderStatus::Submitted => None,
 			HeaderStatus::Ready => oldest_header(&self.ready),
+			HeaderStatus::Submitted => oldest_header(&self.submitted),
+		}
+	}
+
+	/// Get oldest headers from given queue until functor will return false.
+	pub fn headers(&self, status: HeaderStatus, f: impl FnMut(&QueuedHeader) -> bool) -> Option<Vec<&QueuedHeader>> {
+		match status {
+			HeaderStatus::Unknown | HeaderStatus::Synced => return None,
+			HeaderStatus::MaybeOrphan => oldest_headers(&self.maybe_orphan, f),
+			HeaderStatus::Orphan => oldest_headers(&self.orphan, f),
+			HeaderStatus::MaybeReceipts => oldest_headers(&self.maybe_receipts, f),
+			HeaderStatus::Receipts => oldest_headers(&self.receipts, f),
+			HeaderStatus::Ready => oldest_headers(&self.ready, f),
+			HeaderStatus::Submitted => oldest_headers(&self.submitted, f),
 		}
 	}
 
@@ -135,16 +157,26 @@ impl QueuedHeaders {
 				HeaderStatus::MaybeReceipts => remove_header(&mut self.maybe_receipts, &current),
 				HeaderStatus::Receipts => remove_header(&mut self.receipts, &current),
 				HeaderStatus::Ready => remove_header(&mut self.ready, &current),
-				HeaderStatus::Submitted => break,
+				HeaderStatus::Submitted => remove_header(&mut self.submitted, &current),
 				HeaderStatus::Synced => break,
 			}.expect("header has a given status; given queue has the header; qed");
 
-			change_status_to_synced(&mut self.known_headers, &mut self.headers_in_submit_status, &current);
+			log::debug!(target: "bridge", "Ethereum header {:?} is now {:?}", current, HeaderStatus::Synced);
+			*self.known_headers
+				.entry(current.0)
+				.or_default()
+				.entry(current.1)
+				.or_insert(HeaderStatus::Synced) = HeaderStatus::Synced;
 			current = header.parent_id();
 		}
 
 		// remember that the header is synced
-		change_status_to_synced(&mut self.known_headers, &mut self.headers_in_submit_status, id);
+		log::debug!(target: "bridge", "Ethereum header {:?} is now {:?}", id, HeaderStatus::Synced);
+		*self.known_headers
+			.entry(id.0)
+			.or_default()
+			.entry(id.1)
+			.or_insert(HeaderStatus::Synced) = HeaderStatus::Synced;
 
 		// now let's move all descendants from maybe_orphan && orphan queues to
 		// maybe_receipts queue
@@ -210,9 +242,17 @@ impl QueuedHeaders {
 	}
 
 	/// When header is submitted to Substrate node.
-	pub fn header_submitted(&mut self, id: &HeaderId) {
-		remove_header(&mut self.ready, id);
-		change_status_to_submitted(&mut self.known_headers, &mut self.headers_in_submit_status, id);
+	pub fn headers_submitted(&mut self, ids: Vec<HeaderId>) {
+		for id in ids {
+			move_header(
+				&mut self.ready,
+				&mut self.submitted,
+				&mut self.known_headers,
+				HeaderStatus::Submitted,
+				&id,
+				|header| header,
+			);
+		}
 	}
 }
 
@@ -325,39 +365,17 @@ fn oldest_header(queue: &HeadersQueue) -> Option<&QueuedHeader> {
 	queue.values().flat_map(|h| h.values()).next()
 }
 
-/// Changes header status to Submitted.
-fn change_status_to_submitted(
-	known_headers: &mut KnownHeaders,
-	headers_in_submit_status: &mut usize,
-	id: &HeaderId,
-) {
-	match known_headers.entry(id.0) {
-		BTreeMapEntry::Occupied(mut entry) => match entry.get_mut().entry(id.1) {
-			HashMapEntry::Occupied(mut entry) => {
-				log::debug!(target: "bridge", "Ethereum header {:?} is now submitted", id);
-
-				*headers_in_submit_status += 1;
-				*entry.get_mut() = HeaderStatus::Submitted;
-			},
-			HashMapEntry::Vacant(_) => (),
-		},
-		BTreeMapEntry::Vacant(_) => (),
+/// Return oldest headers from the queue until functor will return false.
+fn oldest_headers(queue: &HeadersQueue, mut f: impl FnMut(&QueuedHeader) -> bool) -> Option<Vec<&QueuedHeader>> {
+	let result = queue.values()
+		.flat_map(|h| h.values())
+		.take_while(|h| f(h))
+		.collect::<Vec<_>>();
+	if result.is_empty() {
+		None
+	} else {
+		Some(result)
 	}
-}
-
-/// Changes header status to Synced.
-fn change_status_to_synced(
-	known_headers: &mut KnownHeaders,
-	headers_in_submit_status: &mut usize,
-	id: &HeaderId,
-) {
-	let previous_status = known_headers.entry(id.0).or_default().entry(id.1).or_insert(HeaderStatus::Synced);
-	if *previous_status == HeaderStatus::Submitted {
-		*headers_in_submit_status -= 1;
-	}
-
-	log::debug!(target: "bridge", "Ethereum header {:?} is now synced", id);
-	*previous_status = HeaderStatus::Synced;
 }
 
 #[cfg(test)]

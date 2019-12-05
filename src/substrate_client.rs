@@ -54,7 +54,7 @@ pub async fn ethereum_receipts_required(
 	header: QueuedEthereumHeader,
 ) -> (Client, Result<(EthereumHeaderId, bool), Error>) {
 	let id = header.id();
-	let header = into_substrate_ethereum_header(header.extract().0);
+	let header = into_substrate_ethereum_header(header.header());
 	let encoded_header = header.encode();
 	let (client, receipts_required) = call_rpc(
 		client,
@@ -86,11 +86,11 @@ pub async fn ethereum_header_known(
 }
 
 /// Submits Ethereum header to Substrate runtime.
-pub async fn submit_ethereum_header(
+pub async fn submit_ethereum_headers(
 	client: Client,
-	header: QueuedEthereumHeader,
-) -> (Client, Result<(TransactionHash, EthereumHeaderId), Error>) {
-	let id = header.id();
+	headers: Vec<QueuedEthereumHeader>,
+) -> (Client, Result<(TransactionHash, Vec<EthereumHeaderId>), Error>) {
+	let ids = headers.iter().map(|header| header.id()).collect();
 	let (client, genesis_hash) = block_hash_by_number(client, 0).await;
 	let genesis_hash = match genesis_hash {
 		Ok(genesis_hash) => genesis_hash,
@@ -101,8 +101,8 @@ pub async fn submit_ethereum_header(
 		Ok(nonce) => nonce,
 		Err(err) => return (client, Err(err)),
 	};
-	let transaction = create_transaction(
-		header,
+	let transaction = create_submit_transaction(
+		headers,
 		sp_keyring::AccountKeyring::Alice,
 		nonce,
 		genesis_hash,
@@ -115,7 +115,7 @@ pub async fn submit_ethereum_header(
 			to_value(Bytes(encoded_transaction)).unwrap(),
 		]),
 	).await;
-	(client, transaction_hash.map(|transaction_hash| (transaction_hash, id)))
+	(client, transaction_hash.map(|transaction_hash| (transaction_hash, ids)))
 }
 
 /// Get Substrate block hash by its number.
@@ -206,11 +206,10 @@ async fn call_rpc_u64(
 }
 
 /// Create Substrate transaction for submitting Ethereum header.
-fn create_transaction(
-	header: QueuedEthereumHeader,
+fn create_submit_transaction(
+	headers: Vec<QueuedEthereumHeader>,
 	account: sp_keyring::AccountKeyring,
 	index: node_primitives::Index,
-//	signer: sp_core::sr25519::Pair,
 	genesis_hash: H256,
 ) -> node_runtime::UncheckedExtrinsic {
 	use sp_core::crypto::Pair;
@@ -218,12 +217,18 @@ fn create_transaction(
 
 	let signer = account.pair();
 
-	let (header, receipts) = header.extract();
-
 	let function = node_runtime::Call::BridgeEthPoa(
-		node_runtime::BridgeEthPoaCall::import_header(
-			into_substrate_ethereum_header(header),
-			into_substrate_ethereum_receipts(receipts),
+		node_runtime::BridgeEthPoaCall::import_headers(
+			headers
+				.into_iter()
+				.map(|header| {
+					let (header, receipts) = header.extract();
+					(
+						into_substrate_ethereum_header(&header),
+						into_substrate_ethereum_receipts(&receipts),
+					)
+				})
+				.collect(),
 		),
 	);
 
