@@ -14,9 +14,6 @@ pub type Header = web3::types::Block<H256>;
 /// Ethereum transaction receipt type.
 pub type Receipt = web3::types::TransactionReceipt;
 
-/// Ethereum transaction type.
-pub type Transaction = web3::types::Transaction;
-
 /// Ethereum header Id.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct HeaderId(pub u64, pub H256);

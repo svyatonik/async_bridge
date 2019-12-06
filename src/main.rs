@@ -293,7 +293,7 @@ fn main() {
 						header_for_receipts_retrieval,
 					);
 					eth_receipts_future.set(
-						ethereum_client::transactions_receipts(eth_client, header_for_receipts_retrieval.id()).fuse()
+						ethereum_client::transactions_receipts(eth_client, header_for_receipts_retrieval.id(), header_for_receipts_retrieval.header().transactions.clone()).fuse()
 					);
 				} else if let Some(orphan_header_to_download) = eth_sync.headers().header(EthereumHeaderStatus::Orphan) {
 					// for Orphan we actually ask for parent' header
