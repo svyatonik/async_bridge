@@ -290,7 +290,7 @@ fn main() {
 					log::debug!(
 						target: "bridge",
 						"Retrieving receipts for header: {:?}",
-						header_for_receipts_retrieval,
+						header_for_receipts_retrieval.id(),
 					);
 					eth_receipts_future.set(
 						ethereum_client::transactions_receipts(eth_client, header_for_receipts_retrieval.id(), header_for_receipts_retrieval.header().transactions.clone()).fuse()
