@@ -63,10 +63,12 @@ pub struct HeadersSync {
 impl HeadersSync {
 	/// Returns true if we have synced almost all known headers.
 	pub fn is_almost_synced(&self) -> bool {
-		self.best_header
-			.and_then(|best| self.target_header_number.map(|target| (best, target)))
-			.map(|(best, target)| target.saturating_sub(best.0) < 4)
-			.unwrap_or(false)
+		match self.target_header_number {
+			Some(target_header_number) => self.best_header
+				.map(|best| target_header_number.saturating_sub(best.0) < 4)
+				.unwrap_or(false),
+			None => true,
+		}
 	}
 
 	/// Returns synchronization status.
