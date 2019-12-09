@@ -9,11 +9,10 @@ mod substrate_types;
 
 use crate::ethereum_types::HeaderStatus as EthereumHeaderStatus;
 
-// TODO: since we only need latest substrate headers (where our transactions are included)
-// => better to have subscription here instead of manual polling
+// TODO: when SharedClient will be available, switch to Substrate headers subscription
+// (because we do not need old Substrate headers)
 
 // TODO: when substrate reorgs, we need to reset (?) all info that we have received from Substrate
-
 
 async fn delay(timeout_ms: u64) {
 	async_std::task::sleep(std::time::Duration::from_millis(timeout_ms)).await
@@ -86,7 +85,7 @@ fn main() {
 			sub_receipts_check_future,
 			sub_existence_status_future,
 			sub_submit_header_future,
-			sub_tick_stream,
+			sub_tick_stream
 		);
 
 		loop {
