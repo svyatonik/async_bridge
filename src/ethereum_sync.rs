@@ -49,7 +49,6 @@ pub struct HeadersSync {
 impl HeadersSync {
 	/// Returns true if we have submitted header recently.
 	pub fn is_header_submitted_recently(&self) -> bool {
-		// TODO: this method should be removed after subscription to Substrate headers.
 		true
 	}
 
@@ -109,12 +108,6 @@ impl HeadersSync {
 		let headers_to_submit_count = self.params.max_headers_in_submitted_status
 			.checked_sub(headers_in_submit_status)?;
 
-		// TODO: submitting known (to Substrate) headers should not be penalized
-
-		// TODO: if there's long fork, the sync may stall, because we won't know if
-		// the side header has been accepted until reorg happens
-		// => there should be another mechanism to handle this
-
 		let mut total_size = 0;
 		let mut total_headers = 0;
 		self.headers.headers(HeaderStatus::Ready, |header| {
@@ -125,7 +118,6 @@ impl HeadersSync {
 				return false;
 			}
 
-			// TODO: we might use encoded result when header is submitted
 			let encoded_size = into_substrate_ethereum_header(header.header()).encode().len()
 				+ into_substrate_ethereum_receipts(header.receipts()).map(|receipts| receipts.encode().len())
 					.unwrap_or(0);
