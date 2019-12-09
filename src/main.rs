@@ -23,10 +23,6 @@ fn interval(timeout_ms: u64) -> impl futures::Stream<Item = ()> {
 	futures::stream::unfold((), move |_| async move { delay(timeout_ms).await; Some(((), ())) })
 }
 
-async fn exit_future() {
-	futures::future::pending().await
-}
-
 fn print_progress(
 	progress_context: (std::time::Instant, Option<u64>, Option<u64>),
 	eth_sync: &crate::ethereum_sync::HeadersSync,
@@ -80,8 +76,6 @@ fn main() {
 		let sub_submit_header_future = futures::future::Fuse::terminated();
 		let sub_tick_stream = interval(1000).fuse();
 
-		let exit_future = exit_future().fuse();
-
 		futures::pin_mut!(
 			eth_best_block_number_future,
 			eth_new_header_future,
@@ -93,7 +87,6 @@ fn main() {
 			sub_existence_status_future,
 			sub_submit_header_future,
 			sub_tick_stream,
-			exit_future
 		);
 
 		loop {
@@ -208,10 +201,6 @@ fn main() {
 					if eth_sync.is_header_submitted_recently() {
 						sub_best_block_required = true;
 					}
-				},
-				_ = exit_future => {
-					println!("stopping (exit future signalled)");
-					break;
 				},
 			}
 
