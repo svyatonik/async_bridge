@@ -281,6 +281,18 @@ impl QueuedHeaders {
 		prune_known_headers(&mut self.known_headers, prune_border);
 		self.prune_border = prune_border;
 	}
+
+	/// Forgets all ever known headers.
+	pub fn clear(&mut self) {
+		self.maybe_orphan.clear();
+		self.orphan.clear();
+		self.maybe_receipts.clear();
+		self.receipts.clear();
+		self.ready.clear();
+		self.submitted.clear();
+		self.known_headers.clear();
+		self.prune_border = 0;
+	}
 }
 
 /// Insert header to the queue.

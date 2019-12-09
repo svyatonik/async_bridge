@@ -1,4 +1,4 @@
-#![recursion_limit="512"]
+#![recursion_limit="1024"]
 
 mod ethereum_client;
 mod ethereum_headers;
@@ -12,7 +12,21 @@ use crate::ethereum_types::HeaderStatus as EthereumHeaderStatus;
 // TODO: when SharedClient will be available, switch to Substrate headers subscription
 // (because we do not need old Substrate headers)
 
-// TODO: when substrate reorgs, we need to reset (?) all info that we have received from Substrate
+/// Interval (in ms) at which we check new Ethereum headers when we are synced/almost synced.
+const ETHEREUM_TICK_INTERVAL_MS: u64 = 10_000;
+/// Interval (in ms) at which we check new Substrate blocks.
+const SUBSTRATE_TICK_INTERVAL_MS: u64 = 5_000;
+/// When we submit Ethereum headers to Substrate runtime, but see no updates of best
+/// Ethereum block known to Substrate runtime during STALL_SYNC_TIMEOUT_MS milliseconds,
+/// we consider that our headers are rejected because there has been reorg in Substrate.
+/// This reorg could invalidate oud knowledge about sync process (i.e. we have asked if
+/// HeaderA is known to Substrate, but then reorg happened and the answer is different
+/// now) => we need to reset sync.
+/// The other option is to receive **EVERY** best Substrate header and check if it is
+/// direct child of previous best header. But: (1) subscription doesn't guarantee that
+// the subscriber will receive every best header (2) reorg won't always lead to sync
+/// stall and restart is a heavy operation (we forget all in-memory headers).
+const STALL_SYNC_TIMEOUT_MS: u64 = 30_000;
 
 async fn delay(timeout_ms: u64) {
 	async_std::task::sleep(std::time::Duration::from_millis(timeout_ms)).await
@@ -58,6 +72,7 @@ fn main() {
 
 	local_pool.run_until(async move {
 		let mut eth_sync = crate::ethereum_sync::HeadersSync::default();
+		let mut stall_countdown = None;
 
 		let mut eth_maybe_client = None;
 		let mut eth_best_block_number_required = false;
@@ -65,7 +80,7 @@ fn main() {
 		let eth_new_header_future = futures::future::Fuse::terminated();
 		let eth_orphan_header_future = futures::future::Fuse::terminated();
 		let eth_receipts_future = futures::future::Fuse::terminated();
-		let eth_tick_stream = interval(10 * 1000).fuse();
+		let eth_tick_stream = interval(ETHEREUM_TICK_INTERVAL_MS).fuse();
 
 		let mut sub_maybe_client = None;
 		let mut sub_best_block_required = false;
@@ -73,7 +88,7 @@ fn main() {
 		let sub_receipts_check_future = futures::future::Fuse::terminated();
 		let sub_existence_status_future = futures::future::Fuse::terminated();
 		let sub_submit_header_future = futures::future::Fuse::terminated();
-		let sub_tick_stream = interval(1000).fuse();
+		let sub_tick_stream = interval(SUBSTRATE_TICK_INTERVAL_MS).fuse();
 
 		futures::pin_mut!(
 			eth_best_block_number_future,
@@ -95,7 +110,8 @@ fn main() {
 					eth_best_block_number_required = false;
 
 					match eth_best_block_number {
-						Ok(eth_best_block_number) => eth_sync.ethereum_best_header_number_response(eth_best_block_number),
+						Ok(eth_best_block_number) => eth_sync
+							.ethereum_best_header_number_response(eth_best_block_number),
 						Err(error) => log::error!(
 							target: "bridge",
 							"Error retrieving best header number from Ethereum number: {:?}",
@@ -149,7 +165,35 @@ fn main() {
 					sub_best_block_required = false;
 
 					match sub_best_block {
-						Ok(sub_best_block) => eth_sync.substrate_best_header_response(sub_best_block),
+						Ok(sub_best_block) => {
+							let head_updated = eth_sync.substrate_best_header_response(sub_best_block);
+							match head_updated {
+								// IF head is updated AND there are still our transactions:
+								// => restart stall countdown timer
+								true if eth_sync.headers().headers_in_status(EthereumHeaderStatus::Submitted) != 0 =>
+									stall_countdown = Some(std::time::Instant::now()),
+								// IF head is updated AND there are no our transactions:
+								// => stop stall countdown timer
+								true => stall_countdown = None,
+								// IF head is not updated AND stall countdown is not yet completed
+								// => do nothing
+								false if stall_countdown
+									.map(|stall_countdown| std::time::Instant::now() - stall_countdown <
+										std::time::Duration::from_millis(STALL_SYNC_TIMEOUT_MS))
+									.unwrap_or(true)
+									=> (),
+								// IF head is not updated AND stall countdown has completed
+								// => restart sync
+								false => {
+									log::info!(
+										target: "bridge",
+										"Possible Substrate fork detected. Restarting Ethereum headers synchronization.",
+									);
+									stall_countdown = None;
+									eth_sync.restart();
+								},
+							}
+						},
 						Err(error) => log::error!(
 							target: "bridge",
 							"Error retrieving best known header from Substrate node: {:?}",
@@ -161,7 +205,9 @@ fn main() {
 					sub_maybe_client = Some(sub_client);
 
 					match sub_existence_status {
-						Ok((sub_header, sub_existence_status)) => eth_sync.headers_mut().maybe_orphan_response(&sub_header, sub_existence_status),
+						Ok((sub_header, sub_existence_status)) => eth_sync
+							.headers_mut()
+							.maybe_orphan_response(&sub_header, sub_existence_status),
 						Err(error) => log::error!(
 							target: "bridge",
 							"Error retrieving existence status from Substrate node: {:?}",
@@ -173,7 +219,9 @@ fn main() {
 					sub_maybe_client = Some(sub_client);
 
 					match sub_submit_header_result {
-						Ok((_transction_hash, submitted_headers)) => eth_sync.headers_mut().headers_submitted(submitted_headers),
+						Ok((_transction_hash, submitted_headers)) => eth_sync
+							.headers_mut()
+							.headers_submitted(submitted_headers),
 						Err(error) => log::error!(
 							target: "bridge",
 							"Error submitting header to Substrate node: {:?}",
@@ -188,7 +236,9 @@ fn main() {
 					sub_maybe_client = Some(sub_client);
 
 					match sub_receipts_check_result {
-						Ok((header, receipts_check_result)) => eth_sync.headers_mut().maybe_receipts_response(&header, receipts_check_result),
+						Ok((header, receipts_check_result)) => eth_sync
+							.headers_mut()
+							.maybe_receipts_response(&header, receipts_check_result),
 						Err(error) => log::error!(
 							target: "bridge",
 							"Error retrieving receipts requirement from Substrate node: {:?}",
@@ -197,9 +247,7 @@ fn main() {
 					}
 				},
 				_ = sub_tick_stream.next() => {
-					if eth_sync.is_header_submitted_recently() {
-						sub_best_block_required = true;
-					}
+					sub_best_block_required = true;
 				},
 			}
 
@@ -228,9 +276,9 @@ fn main() {
 					sub_receipts_check_future.set(
 						substrate_client::ethereum_receipts_required(sub_client, header).fuse()
 					);
-				} else if let Some(header_for_existence_status) = eth_sync.headers().header(EthereumHeaderStatus::MaybeOrphan) {
+				} else if let Some(header) = eth_sync.headers().header(EthereumHeaderStatus::MaybeOrphan) {
 					// for MaybeOrphan we actually ask for parent' header existence
-					let parent_id = header_for_existence_status.parent_id();
+					let parent_id = header.parent_id();
 
 					log::debug!(
 						target: "bridge",
@@ -258,6 +306,11 @@ fn main() {
 					sub_submit_header_future.set(
 						substrate_client::submit_ethereum_headers(sub_client, headers).fuse(),
 					);
+
+					// remember that we have submitted some headers
+					if stall_countdown.is_none() {
+						stall_countdown = Some(std::time::Instant::now());
+					}
 				} else {
 					sub_maybe_client = Some(sub_client);
 				}
@@ -274,18 +327,23 @@ fn main() {
 				if eth_best_block_number_required {
 					log::debug!(target: "bridge", "Asking Ethereum node about best block number");
 					eth_best_block_number_future.set(ethereum_client::best_block_number(eth_client).fuse());
-				} else if let Some(header_for_receipts_retrieval) = eth_sync.headers().header(EthereumHeaderStatus::Receipts) {
+				} else if let Some(header) = eth_sync.headers().header(EthereumHeaderStatus::Receipts) {
+					let id = header.id();
 					log::debug!(
 						target: "bridge",
 						"Retrieving receipts for header: {:?}",
-						header_for_receipts_retrieval.id(),
+						id,
 					);
 					eth_receipts_future.set(
-						ethereum_client::transactions_receipts(eth_client, header_for_receipts_retrieval.id(), header_for_receipts_retrieval.header().transactions.clone()).fuse()
+						ethereum_client::transactions_receipts(
+							eth_client,
+							id,
+							header.header().transactions.clone(),
+						).fuse()
 					);
-				} else if let Some(orphan_header_to_download) = eth_sync.headers().header(EthereumHeaderStatus::Orphan) {
+				} else if let Some(header) = eth_sync.headers().header(EthereumHeaderStatus::Orphan) {
 					// for Orphan we actually ask for parent' header
-					let parent_id = orphan_header_to_download.parent_id();
+					let parent_id = header.parent_id();
 
 					log::debug!(
 						target: "bridge",
@@ -296,15 +354,15 @@ fn main() {
 					eth_orphan_header_future.set(
 						ethereum_client::header_by_hash(eth_client, parent_id.1).fuse(),
 					);
-				} else if let Some(new_header_to_download) = eth_sync.select_new_header_to_download() {
+				} else if let Some(id) = eth_sync.select_new_header_to_download() {
 					log::debug!(
 						target: "bridge",
 						"Going to download new header from Ethereum node: {:?}",
-						new_header_to_download,
+						id,
 					);
 
 					eth_new_header_future.set(
-						ethereum_client::header_by_number(eth_client, new_header_to_download).fuse(),
+						ethereum_client::header_by_number(eth_client, id).fuse(),
 					);
 				} else {
 					eth_maybe_client = Some(eth_client);

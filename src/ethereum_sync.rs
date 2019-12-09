@@ -40,18 +40,11 @@ pub struct HeadersSync {
 	target_header_number: Option<u64>,
 	/// Best header known to Substrate node.
 	best_header: Option<HeaderId>,
-	/// The number of header that we have submitted recently.
-	unconfirmed_best_header_number: u64,
 	/// Headers queue.
 	headers: QueuedHeaders,
 }
 
 impl HeadersSync {
-	/// Returns true if we have submitted header recently.
-	pub fn is_header_submitted_recently(&self) -> bool {
-		true
-	}
-
 	/// Returns true if we have synced almost all known headers.
 	pub fn is_almost_synced(&self) -> bool {
 		self.best_header
@@ -139,12 +132,13 @@ impl HeadersSync {
 	}
 
 	/// Receive new best header from the Substrate node.
-	pub fn substrate_best_header_response(&mut self, best_header: HeaderId) {
+	/// Returns true if it is different from the previous block known to us.
+	pub fn substrate_best_header_response(&mut self, best_header: HeaderId) -> bool {
 		log::debug!(target: "bridge", "Received best known header from Substrate: {:?}", best_header);
 
 		// early return if it is still the same
 		if self.best_header == Some(best_header) {
-			return;
+			return false;
 		}
 
 		// remember that this header is now known to the Substrate runtime
@@ -155,6 +149,15 @@ impl HeadersSync {
 
 		// finally remember the best header itself
 		self.best_header = Some(best_header);
+
+		true
+	}
+
+	/// Restart synchronization.
+	pub fn restart(&mut self) {
+		self.target_header_number = None;
+		self.best_header = None;
+		self.headers.clear();
 	}
 }
 
