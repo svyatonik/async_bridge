@@ -14,8 +14,13 @@ use crate::substrate_types::{
 	into_substrate_ethereum_receipts,
 };
 
-/// Ethereum client type.
-pub type Client = HttpClient;
+/// Substrate client type.
+pub struct Client {
+	/// Substrate RPC client.
+	rpc_client: HttpClient,
+	/// Genesis block hash.
+	genesis_hash: Option<H256>,
+}
 
 /// All possible errors that can occur during interacting with Ethereum node.
 #[derive(Debug)]
@@ -32,7 +37,10 @@ pub enum Error {
 
 /// Returns client that is able to call RPCs on Substrate node.
 pub fn client() -> Client {
-	http_client("http://127.0.0.1:11010")
+	Client {
+		rpc_client: http_client("http://127.0.0.1:11010"),
+		genesis_hash: None,
+	}
 }
 
 /// Returns best Ethereum block that Substrate runtime knows of.
@@ -96,10 +104,17 @@ pub async fn submit_ethereum_headers(
 	headers: Vec<QueuedEthereumHeader>,
 ) -> (Client, Result<(TransactionHash, Vec<EthereumHeaderId>), Error>) {
 	let ids = headers.iter().map(|header| header.id()).collect();
-	let (client, genesis_hash) = block_hash_by_number(client, 0).await;
-	let genesis_hash = match genesis_hash {
-		Ok(genesis_hash) => genesis_hash,
-		Err(err) => return (client, Err(err)),
+	let (client, genesis_hash) = match client.genesis_hash {
+		Some(genesis_hash) => (client, genesis_hash),
+		None => {
+			let (mut client, genesis_hash) = block_hash_by_number(client, 0).await;
+			let genesis_hash = match genesis_hash {
+				Ok(genesis_hash) => genesis_hash,
+				Err(err) => return (client, Err(err)),
+			};
+			client.genesis_hash = Some(genesis_hash);
+			(client, genesis_hash)
+		},
 	};
 	let (client, nonce) = next_account_index(client, sp_keyring::AccountKeyring::Alice.to_account_id()).await;
 	let nonce = match nonce {
@@ -163,12 +178,14 @@ async fn call_rpc<T: Decode>(
 		params: Params,
 	) -> Result<T, Error> {
 		let request_id = client
+			.rpc_client
 			.start_request(method, params)
 			.await
 			.map_err(Error::StartRequestFailed)?;
 		// WARN: if there'll be need for executing >1 request at a time, we should avoid
 		// calling request_by_id
 		let response = client
+			.rpc_client
 			.request_by_id(request_id)
 			.ok_or(Error::RequestNotFound)?
 			.await
@@ -193,12 +210,14 @@ async fn call_rpc_u64(
 		params: Params,
 	) -> Result<u64, Error> {
 		let request_id = client
+			.rpc_client
 			.start_request(method, params)
 			.await
 			.map_err(Error::StartRequestFailed)?;
 		// WARN: if there'll be need for executing >1 request at a time, we should avoid
 		// calling request_by_id
 		let response = client
+			.rpc_client
 			.request_by_id(request_id)
 			.ok_or(Error::RequestNotFound)?
 			.await
