@@ -26,4 +26,4 @@ sp-bridge-eth-poa = { git = "https://github.com/svyatonik/substrate.git", branch
 sp-core = { git = "https://github.com/svyatonik/substrate.git", branch = "bridge_runtime" }
 sp-keyring = { git = "https://github.com/svyatonik/substrate.git", branch = "bridge_runtime" }
 sp-runtime = { git = "https://github.com/svyatonik/substrate.git", branch = "bridge_runtime" }
-web3 = { git = "https://github.com/tomusdrw/rust-web3.git" }
+web3 = { git = "https://github.com/svyatonik/rust-web3.git", branch = "fix_receipt" }

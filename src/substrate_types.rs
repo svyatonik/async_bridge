@@ -43,6 +43,10 @@ pub fn into_substrate_ethereum_receipts(
 			topics: log_entry.topics.clone(),
 			data: log_entry.data.0.clone(),
 		}).collect(),
-		outcome: SubstrateEthereumTransactionOutcome::Unknown, // TODO
+		outcome: match (receipt.status, receipt.root) {
+			(Some(status), None) => SubstrateEthereumTransactionOutcome::StatusCode(status.as_u64() as u8),
+			(None, Some(root)) => SubstrateEthereumTransactionOutcome::StateRoot(root),
+			_ => SubstrateEthereumTransactionOutcome::Unknown,
+		},
 	}).collect())
 }
