@@ -31,9 +31,18 @@ pub struct QueuedHeaders {
 	submitted: HeadersQueue,
 	/// Pointers to all headers that we ever seen and we believe we can touch in the future.
 	known_headers: KnownHeaders,
+	/// Pruned blocks border. We do not store or accept any blocks with number less than
+	/// this number.
+	prune_border: u64,
 }
 
 impl QueuedHeaders {
+	/// Returns prune border.
+	#[cfg(test)]
+	pub fn prune_border(&self) -> u64 {
+		self.prune_border
+	}
+
 	/// Returns number of headers that are currently in given queue.
 	pub fn headers_in_status(&self, status: HeaderStatus) -> usize {
 		match status {
@@ -110,13 +119,15 @@ impl QueuedHeaders {
 
 	/// Appends new header to the queue.
 	pub fn header_response(&mut self, header: Header) {
-		// TODO: if we are receiving header #100 and Substrate runtime has best header #10000, then
-		// probably we would ignore this #100
-
 		let id = (&header).into();
 		let status = self.status(&id);
 		if status != HeaderStatus::Unknown {
 			log::debug!(target: "bridge", "Ignoring new Ethereum header: {:?}. Status is {:?}.", id, status);
+			return;
+		}
+
+		if id.0 < self.prune_border {
+			log::debug!(target: "bridge", "Ignoring ancient new Ethereum header: {:?}.", id);
 			return;
 		}
 
@@ -254,6 +265,22 @@ impl QueuedHeaders {
 			);
 		}
 	}
+
+	/// Prune and never accep headers before this block.
+	pub fn prune(&mut self, prune_border: u64) {
+		if prune_border <= self.prune_border {
+			return;
+		}
+		
+		prune_queue(&mut self.maybe_orphan, prune_border);
+		prune_queue(&mut self.orphan, prune_border);
+		prune_queue(&mut self.maybe_receipts, prune_border);
+		prune_queue(&mut self.receipts, prune_border);
+		prune_queue(&mut self.ready, prune_border);
+		prune_queue(&mut self.submitted, prune_border);
+		prune_known_headers(&mut self.known_headers, prune_border);
+		self.prune_border = prune_border;
+	}
 }
 
 /// Insert header to the queue.
@@ -376,6 +403,22 @@ fn oldest_headers(queue: &HeadersQueue, mut f: impl FnMut(&QueuedHeader) -> bool
 	} else {
 		Some(result)
 	}
+}
+
+/// Forget all headers with number less than given.
+fn prune_queue(queue: &mut HeadersQueue, prune_border: u64) {
+	*queue = queue.split_off(&prune_border);
+}
+
+/// Forget all known headers with number less than given.
+fn prune_known_headers(known_headers: &mut KnownHeaders, prune_border: u64) {
+	let new_known_headers = known_headers.split_off(&prune_border);
+	for (pruned_number, pruned_headers) in &*known_headers {
+		for pruned_hash in pruned_headers.keys() {
+			log::debug!(target: "bridge", "Pruning header {:?}.", HeaderId(*pruned_number, *pruned_hash));
+		}
+	}
+	*known_headers = new_known_headers;
 }
 
 #[cfg(test)]
@@ -644,8 +687,47 @@ pub(crate) mod tests {
 		let mut queue = QueuedHeaders::default();
 		queue.known_headers.entry(100).or_default().insert(hash(100), HeaderStatus::Ready);
 		queue.ready.entry(100).or_default().insert(hash(100), header(100));
-		queue.header_submitted(&id(100));
+		queue.headers_submitted(vec![id(100)]);
 		assert!(queue.ready.is_empty());
 		assert_eq!(queue.known_headers[&100][&hash(100)], HeaderStatus::Submitted);
+	}
+
+	#[test]
+	fn prune_works() {
+		let mut queue = QueuedHeaders::default();
+		queue.known_headers.entry(104).or_default().insert(hash(104), HeaderStatus::MaybeOrphan);
+		queue.maybe_orphan.entry(104).or_default().insert(hash(104), header(104));
+		queue.known_headers.entry(103).or_default().insert(hash(103), HeaderStatus::Orphan);
+		queue.orphan.entry(103).or_default().insert(hash(103), header(103));
+		queue.known_headers.entry(102).or_default().insert(hash(102), HeaderStatus::MaybeReceipts);
+		queue.maybe_receipts.entry(102).or_default().insert(hash(102), header(102));
+		queue.known_headers.entry(101).or_default().insert(hash(101), HeaderStatus::Receipts);
+		queue.receipts.entry(101).or_default().insert(hash(101), header(101));
+		queue.known_headers.entry(100).or_default().insert(hash(100), HeaderStatus::Ready);
+		queue.ready.entry(100).or_default().insert(hash(100), header(100));
+
+		queue.prune(102);
+
+		assert_eq!(queue.ready.len(), 0);
+		assert_eq!(queue.receipts.len(), 0);
+		assert_eq!(queue.maybe_receipts.len(), 1);
+		assert_eq!(queue.orphan.len(), 1);
+		assert_eq!(queue.maybe_orphan.len(), 1);
+		assert_eq!(queue.known_headers.len(), 3);
+
+		queue.prune(110);
+
+		assert_eq!(queue.ready.len(), 0);
+		assert_eq!(queue.receipts.len(), 0);
+		assert_eq!(queue.maybe_receipts.len(), 0);
+		assert_eq!(queue.orphan.len(), 0);
+		assert_eq!(queue.maybe_orphan.len(), 0);
+		assert_eq!(queue.known_headers.len(), 0);
+
+		queue.header_response(header(109).header().clone());
+		assert_eq!(queue.known_headers.len(), 0);
+
+		queue.header_response(header(110).header().clone());
+		assert_eq!(queue.known_headers.len(), 1);
 	}
 }

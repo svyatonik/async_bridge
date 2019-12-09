@@ -14,6 +14,9 @@ pub struct HeadersSyncParams {
 	pub max_headers_in_single_submit: usize,
 	/// Maximal total headers size in single submit request.
 	pub max_headers_size_in_single_submit: usize,
+	/// We only may store and accept (from Ethereum node) headers that have
+	/// number >= than best_substrate_header.number - prune_depth.
+	pub prune_depth: u64,
 }
 
 impl Default for HeadersSyncParams {
@@ -23,6 +26,7 @@ impl Default for HeadersSyncParams {
 			max_headers_in_submitted_status: 128,
 			max_headers_in_single_submit: 32,
 			max_headers_size_in_single_submit: 131_072,
+			prune_depth: 4096,
 		}
 	}
 }
@@ -154,6 +158,9 @@ impl HeadersSync {
 		// remember that this header is now known to the Substrate runtime
 		self.headers.substrate_best_header_response(&best_header);
 
+		// prune ancient headers
+		self.headers.prune(best_header.0.saturating_sub(self.params.prune_depth));
+
 		// finally remember the best header itself
 		self.best_header = Some(best_header);
 	}
@@ -219,28 +226,28 @@ mod tests {
 		assert_eq!(eth_sync.headers.header(HeaderStatus::MaybeReceipts), Some(&header(101)));
 		eth_sync.headers.maybe_receipts_response(&id(101), false);
 		assert_eq!(eth_sync.headers.header(HeaderStatus::Ready), Some(&header(101)));
-		assert_eq!(eth_sync.select_header_to_submit(), Some(&header(101)));
+		assert_eq!(eth_sync.select_headers_to_submit(), Some(vec![&header(101)]));
 
 		// and header #102 is ready to be downloaded
 		assert_eq!(eth_sync.select_new_header_to_download(), Some(102));
 		eth_sync.headers.header_response(header(102).header().clone());
 
 		// receive submission confirmation
-		eth_sync.headers.header_submitted(&id(101));
+		eth_sync.headers.headers_submitted(vec![id(101)]);
 
 		// we have nothing to submit because previous header hasn't been confirmed yet
 		// (and we allow max 1 submit transaction in the wild)
 		assert_eq!(eth_sync.headers.header(HeaderStatus::MaybeReceipts), Some(&header(102)));
 		eth_sync.headers.maybe_receipts_response(&id(102), false);
 		assert_eq!(eth_sync.headers.header(HeaderStatus::Ready), Some(&header(102)));
-		assert_eq!(eth_sync.select_header_to_submit(), None);
+		assert_eq!(eth_sync.select_headers_to_submit(), None);
 
 		// substrate reports that it has imported block #101
 		eth_sync.substrate_best_header_response(id(101));
 
 		// and we are ready to submit #102
-		assert_eq!(eth_sync.select_header_to_submit(), Some(&header(102)));
-		eth_sync.headers.header_submitted(&id(102));
+		assert_eq!(eth_sync.select_headers_to_submit(), Some(vec![&header(102)]));
+		eth_sync.headers.headers_submitted(vec![id(102)]);
 
 		// substrate reports that it has imported block #102
 		eth_sync.substrate_best_header_response(id(102));
@@ -264,7 +271,7 @@ mod tests {
 		eth_sync.headers.header_response(header(101).header().clone());
 
 		// we can't submit header #101, because its parent status is unknown
-		assert_eq!(eth_sync.select_header_to_submit(), None);
+		assert_eq!(eth_sync.select_headers_to_submit(), None);
 
 		// instead we are trying to determine status of its parent (#100)
 		assert_eq!(eth_sync.headers.header(HeaderStatus::MaybeOrphan), Some(&header(101)));
@@ -277,7 +284,7 @@ mod tests {
 		eth_sync.headers.header_response(header(100).header().clone());
 
 		// we can't submit header #100, because its parent status is unknown
-		assert_eq!(eth_sync.select_header_to_submit(), None);
+		assert_eq!(eth_sync.select_headers_to_submit(), None);
 
 		// instead we are trying to determine status of its parent (#99)
 		assert_eq!(eth_sync.headers.header(HeaderStatus::MaybeOrphan), Some(&header(100)));
@@ -288,13 +295,21 @@ mod tests {
 		// and we are ready to submit #100
 		assert_eq!(eth_sync.headers.header(HeaderStatus::MaybeReceipts), Some(&header(100)));
 		eth_sync.headers.maybe_receipts_response(&id(100), false);
-		assert_eq!(eth_sync.select_header_to_submit(), Some(&header(100)));
-		eth_sync.headers.header_submitted(&id(100));
+		assert_eq!(eth_sync.select_headers_to_submit(), Some(vec![&header(100)]));
+		eth_sync.headers.headers_submitted(vec![id(100)]);
 
 		// and we are ready to submit #101
 		assert_eq!(eth_sync.headers.header(HeaderStatus::MaybeReceipts), Some(&header(101)));
 		eth_sync.headers.maybe_receipts_response(&id(101), false);
-		assert_eq!(eth_sync.select_header_to_submit(), Some(&header(101)));
-		eth_sync.headers.header_submitted(&id(101));
+		assert_eq!(eth_sync.select_headers_to_submit(), Some(vec![&header(101)]));
+		eth_sync.headers.headers_submitted(vec![id(101)]);
+	}
+
+	#[test]
+	fn pruning_happens_on_substrate_best_header_response() {
+		let mut eth_sync = HeadersSync::default();
+		eth_sync.params.prune_depth = 50;
+		eth_sync.substrate_best_header_response(id(100));
+		assert_eq!(eth_sync.headers.prune_border(), 50);
 	}
 }
