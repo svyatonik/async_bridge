@@ -72,7 +72,12 @@ pub async fn ethereum_header_known(
 	client: Client,
 	id: EthereumHeaderId,
 ) -> (Client, Result<(EthereumHeaderId, bool), Error>) {
-	// TODO: it is unknown if pruned => we need to cut off old queries
+	// Substrate module could prune old headers. So this fn could return false even
+	// if header is synced. And we'll mark corresponding Ethereum header as Orphan.
+	//
+	// But when we'll read best header from Substrate next time, we will know that
+	// there's a better header => this Orphan will either be marked as synced, or
+	// eventually pruned.
 	let encoded_id = id.1.encode();
 	let (client, is_known_block) = call_rpc(
 		client,
