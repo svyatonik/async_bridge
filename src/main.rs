@@ -25,6 +25,7 @@ mod substrate_client;
 mod substrate_types;
 
 use std::io::Write;
+use sp_core::crypto::Pair;
 
 fn main() {
 	initialize();
@@ -90,6 +91,11 @@ fn ethereum_sync_params() -> Result<ethereum_sync_loop::EthereumSyncParams, Stri
 	}
 	if let Some(sub_port) = matches.value_of("sub-port") {
 		eth_sync_params.sub_port = sub_port.parse().map_err(|e| format!("{}", e))?;
+	}
+	if let Some(sub_signer) = matches.value_of("sub-signer") {
+		let sub_signer_password = matches.value_of("sub-signer-password");
+		eth_sync_params.sub_signer = sp_core::sr25519::Pair::from_string(sub_signer, sub_signer_password)
+			.map_err(|e| format!("{:?}", e))?;
 	}
 
 	Ok(eth_sync_params)
