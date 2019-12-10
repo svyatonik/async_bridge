@@ -48,8 +48,8 @@ pub enum Error {
 }
 
 /// Returns client that is able to call RPCs on Ethereum node.
-pub fn client() -> Client {
-	http_client("http://127.0.0.1:8545")
+pub fn client(uri: &str) -> Client {
+	http_client(uri)
 }
 
 /// Retrieve best known block number from Ethereum node.

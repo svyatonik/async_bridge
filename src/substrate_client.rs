@@ -18,6 +18,8 @@ use codec::{Encode, Decode};
 use jsonrpsee_core::{client::ClientError, common::Params};
 use jsonrpsee_http::{HttpClient, RequestError, http_client};
 use serde_json::{from_value, to_value};
+use sp_core::crypto::Pair;
+use sp_runtime::traits::IdentifyAccount;
 use crate::ethereum_types::{
 	Bytes,
 	H256,
@@ -34,6 +36,8 @@ use crate::substrate_types::{
 pub struct Client {
 	/// Substrate RPC client.
 	rpc_client: HttpClient,
+	/// Transactions signer.
+	signer: sp_core::sr25519::Pair,
 	/// Genesis block hash.
 	genesis_hash: Option<H256>,
 }
@@ -52,9 +56,10 @@ pub enum Error {
 }
 
 /// Returns client that is able to call RPCs on Substrate node.
-pub fn client() -> Client {
+pub fn client(uri: &str, signer: sp_core::sr25519::Pair) -> Client {
 	Client {
-		rpc_client: http_client("http://127.0.0.1:11010"),
+		rpc_client: http_client(uri),
+		signer,
 		genesis_hash: None,
 	}
 }
@@ -132,14 +137,15 @@ pub async fn submit_ethereum_headers(
 			(client, genesis_hash)
 		},
 	};
-	let (client, nonce) = next_account_index(client, sp_keyring::AccountKeyring::Alice.to_account_id()).await;
+	let account_id = client.signer.public().as_array_ref().clone().into();
+	let (client, nonce) = next_account_index(client, account_id).await;
 	let nonce = match nonce {
 		Ok(nonce) => nonce,
 		Err(err) => return (client, Err(err)),
 	};
 	let transaction = create_submit_transaction(
 		headers,
-		sp_keyring::AccountKeyring::Alice,
+		&client.signer,
 		nonce,
 		genesis_hash,
 	);
@@ -248,15 +254,10 @@ async fn call_rpc_u64(
 /// Create Substrate transaction for submitting Ethereum header.
 fn create_submit_transaction(
 	headers: Vec<QueuedEthereumHeader>,
-	account: sp_keyring::AccountKeyring,
+	signer: &sp_core::sr25519::Pair,
 	index: node_primitives::Index,
 	genesis_hash: H256,
 ) -> node_runtime::UncheckedExtrinsic {
-	use sp_core::crypto::Pair;
-	use sp_runtime::traits::IdentifyAccount;
-
-	let signer = account.pair();
-
 	let function = node_runtime::Call::BridgeEthPoa(
 		node_runtime::BridgeEthPoaCall::import_headers(
 			headers

@@ -15,43 +15,16 @@
 // along with Parity-Bridge.  If not, see <http://www.gnu.org/licenses/>.
 
 use codec::Encode;
-use crate::ethereum_types::{HeaderId, HeaderStatus, QueuedHeader};
 use crate::ethereum_headers::QueuedHeaders;
+use crate::ethereum_types::{HeaderId, HeaderStatus, QueuedHeader};
+use crate::ethereum_sync_loop::EthereumSyncParams;
 use crate::substrate_types::{into_substrate_ethereum_header, into_substrate_ethereum_receipts};
 
-/// Ethereum synchronization parameters.
-#[derive(Debug)]
-pub struct HeadersSyncParams {
-	/// Maximal number of ethereum headers to pre-download.
-	pub max_future_headers_to_download: usize,
-	/// Maximal number of active (we believe) submit header transactions.
-	pub max_headers_in_submitted_status: usize,
-	/// Maximal number of headers in single submit request.
-	pub max_headers_in_single_submit: usize,
-	/// Maximal total headers size in single submit request.
-	pub max_headers_size_in_single_submit: usize,
-	/// We only may store and accept (from Ethereum node) headers that have
-	/// number >= than best_substrate_header.number - prune_depth.
-	pub prune_depth: u64,
-}
-
-impl Default for HeadersSyncParams {
-	fn default() -> Self {
-		HeadersSyncParams {
-			max_future_headers_to_download: 128,
-			max_headers_in_submitted_status: 128,
-			max_headers_in_single_submit: 32,
-			max_headers_size_in_single_submit: 131_072,
-			prune_depth: 4096,
-		}
-	}
-}
-
 /// Ethereum headers synchronization context.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct HeadersSync {
 	/// Synchronization parameters.
-	params: HeadersSyncParams,
+	params: EthereumSyncParams,
 	/// Best header number known to Ethereum node.
 	target_header_number: Option<u64>,
 	/// Best header known to Substrate node.
@@ -61,6 +34,16 @@ pub struct HeadersSync {
 }
 
 impl HeadersSync {
+	/// Creates new Ethereum headers synchronizer.
+	pub fn new(params: EthereumSyncParams) -> Self {
+		HeadersSync {
+			params,
+			target_header_number: None,
+			best_header: None,
+			headers: Default::default(),
+		}
+	}
+
 	/// Returns true if we have synced almost all known headers.
 	pub fn is_almost_synced(&self) -> bool {
 		match self.target_header_number {
@@ -191,7 +174,7 @@ mod tests {
 
 	#[test]
 	fn select_new_header_to_download_works() {
-		let mut eth_sync = HeadersSync::default();
+		let mut eth_sync = HeadersSync::new(Default::default());
 
 		// both best && target headers are unknown
 		assert_eq!(eth_sync.select_new_header_to_download(), None);
@@ -222,7 +205,7 @@ mod tests {
 
 	#[test]
 	fn sync_without_reorgs_works() {
-		let mut eth_sync = HeadersSync::default();
+		let mut eth_sync = HeadersSync::new(Default::default());
 		eth_sync.params.max_headers_in_submitted_status = 1;
 
 		// ethereum reports best header #102
@@ -271,7 +254,7 @@ mod tests {
 
 	#[test]
 	fn sync_with_orphan_headers_work() {
-		let mut eth_sync = HeadersSync::default();
+		let mut eth_sync = HeadersSync::new(Default::default());
 
 		// ethereum reports best header #102
 		eth_sync.ethereum_best_header_number_response(102);
@@ -320,7 +303,7 @@ mod tests {
 
 	#[test]
 	fn pruning_happens_on_substrate_best_header_response() {
-		let mut eth_sync = HeadersSync::default();
+		let mut eth_sync = HeadersSync::new(Default::default());
 		eth_sync.params.prune_depth = 50;
 		eth_sync.substrate_best_header_response(id(100));
 		assert_eq!(eth_sync.headers.prune_border(), 50);
