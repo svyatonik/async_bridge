@@ -18,6 +18,7 @@ use jsonrpsee_core::{client::ClientError, common::Params};
 use jsonrpsee_http::{HttpClient, RequestError, http_client};
 use serde::de::DeserializeOwned;
 use serde_json::{from_value, to_value};
+use crate::ethereum_sync_loop::MaybeConnectionError;
 use crate::ethereum_types::{H256, Header, HeaderId, Receipt, U64};
 
 /// Proof of hash serialization success.
@@ -45,6 +46,15 @@ pub enum Error {
 	IncompleteHeader,
 	/// We have received receipt with missing gas_used field.
 	IncompleteReceipt,
+}
+
+impl MaybeConnectionError for Error {
+	fn is_connection_error(&self) -> bool {
+		match *self {
+			Error::StartRequestFailed(_) | Error::ResponseRetrievalFailed(_) => true,
+			_ => false,
+		}
+	}
 }
 
 /// Returns client that is able to call RPCs on Ethereum node.

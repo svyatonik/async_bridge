@@ -37,6 +37,15 @@ const SUBSTRATE_TICK_INTERVAL_MS: u64 = 5_000;
 /// the subscriber will receive every best header (2) reorg won't always lead to sync
 /// stall and restart is a heavy operation (we forget all in-memory headers).
 const STALL_SYNC_TIMEOUT_MS: u64 = 30_000;
+/// Delay (in milliseconds) after connection-related error happened before we'll try
+/// reconnection again.
+const CONNECTION_ERROR_DELAY_MS: u64 = 10_000;
+
+/// Error type that can signal connection errors.
+pub trait MaybeConnectionError {
+	/// Returns true if error (maybe) represents connection error.
+	fn is_connection_error(&self) -> bool;
+}
 
 /// Ethereum synchronization parameters.
 pub struct EthereumSyncParams {
@@ -117,6 +126,7 @@ pub fn run(params: EthereumSyncParams) {
 		let eth_new_header_future = futures::future::Fuse::terminated();
 		let eth_orphan_header_future = futures::future::Fuse::terminated();
 		let eth_receipts_future = futures::future::Fuse::terminated();
+		let eth_go_offline_future = futures::future::Fuse::terminated();
 		let eth_tick_stream = interval(ETHEREUM_TICK_INTERVAL_MS).fuse();
 
 		let mut sub_maybe_client = None;
@@ -127,6 +137,7 @@ pub fn run(params: EthereumSyncParams) {
 		let sub_receipts_check_future = futures::future::Fuse::terminated();
 		let sub_existence_status_future = futures::future::Fuse::terminated();
 		let sub_submit_header_future = futures::future::Fuse::terminated();
+		let sub_go_offline_future = futures::future::Fuse::terminated();
 		let sub_tick_stream = interval(SUBSTRATE_TICK_INTERVAL_MS).fuse();
 
 		futures::pin_mut!(
@@ -134,65 +145,66 @@ pub fn run(params: EthereumSyncParams) {
 			eth_new_header_future,
 			eth_orphan_header_future,
 			eth_receipts_future,
+			eth_go_offline_future,
 			eth_tick_stream,
 			sub_best_block_future,
 			sub_receipts_check_future,
 			sub_existence_status_future,
 			sub_submit_header_future,
+			sub_go_offline_future,
 			sub_tick_stream
 		);
 
 		loop {
 			futures::select! {
 				(eth_client, eth_best_block_number) = eth_best_block_number_future => {
-					eth_maybe_client = Some(eth_client);
 					eth_best_block_number_required = false;
 
-					match eth_best_block_number {
-						Ok(eth_best_block_number) => eth_sync
-							.ethereum_best_header_number_response(eth_best_block_number),
-						Err(error) => log::error!(
-							target: "bridge",
-							"Error retrieving best header number from Ethereum number: {:?}",
-							error,
-						),
-					}
+					process_future_result(
+						&mut eth_maybe_client,
+						eth_client,
+						eth_best_block_number,
+						|eth_best_block_number| eth_sync.ethereum_best_header_number_response(eth_best_block_number),
+						&mut eth_go_offline_future,
+						|eth_client| delay(CONNECTION_ERROR_DELAY_MS, eth_client),
+						"Error retrieving best header number from Ethereum number",
+					);
 				},
 				(eth_client, eth_new_header) = eth_new_header_future => {
-					eth_maybe_client = Some(eth_client);
-
-					match eth_new_header {
-						Ok(eth_new_header) => eth_sync.headers_mut().header_response(eth_new_header),
-						Err(error) => log::error!(
-							target: "bridge",
-							"Error retrieving header from Ethereum node: {:?}",
-							error,
-						),
-					}
+					process_future_result(
+						&mut eth_maybe_client,
+						eth_client,
+						eth_new_header,
+						|eth_new_header| eth_sync.headers_mut().header_response(eth_new_header),
+						&mut eth_go_offline_future,
+						|eth_client| delay(CONNECTION_ERROR_DELAY_MS, eth_client),
+						"Error retrieving header from Ethereum node",
+					);
 				},
 				(eth_client, eth_orphan_header) = eth_orphan_header_future => {
-					eth_maybe_client = Some(eth_client);
-
-					match eth_orphan_header {
-						Ok(eth_orphan_header) => eth_sync.headers_mut().header_response(eth_orphan_header),
-						Err(error) => log::error!(
-							target: "bridge",
-							"Error retrieving header from Ethereum node: {:?}",
-							error,
-						),
-					}
+					process_future_result(
+						&mut eth_maybe_client,
+						eth_client,
+						eth_orphan_header,
+						|eth_orphan_header| eth_sync.headers_mut().header_response(eth_orphan_header),
+						&mut eth_go_offline_future,
+						|eth_client| delay(CONNECTION_ERROR_DELAY_MS, eth_client),
+						"Error retrieving orphan header from Ethereum node",
+					);
 				},
 				(eth_client, eth_receipts) = eth_receipts_future => {
+					process_future_result(
+						&mut eth_maybe_client,
+						eth_client,
+						eth_receipts,
+						|(header, receipts)| eth_sync.headers_mut().receipts_response(&header, receipts),
+						&mut eth_go_offline_future,
+						|eth_client| delay(CONNECTION_ERROR_DELAY_MS, eth_client),
+						"Error retrieving transactions receipts from Ethereum node",
+					);
+				},
+				eth_client = eth_go_offline_future => {
 					eth_maybe_client = Some(eth_client);
-
-					match eth_receipts {
-						Ok((header, receipts)) => eth_sync.headers_mut().receipts_response(&header, receipts),
-						Err(error) => log::error!(
-							target: "bridge",
-							"Error retrieving transactions receipts from Ethereum node: {:?}",
-							error,
-						),
-					}
 				},
 				_ = eth_tick_stream.next() => {
 					if eth_sync.is_almost_synced() {
@@ -200,11 +212,13 @@ pub fn run(params: EthereumSyncParams) {
 					}
 				},
 				(sub_client, sub_best_block) = sub_best_block_future => {
-					sub_maybe_client = Some(sub_client);
 					sub_best_block_required = false;
 
-					match sub_best_block {
-						Ok(sub_best_block) => {
+					process_future_result(
+						&mut sub_maybe_client,
+						sub_client,
+						sub_best_block,
+						|sub_best_block| {
 							let head_updated = eth_sync.substrate_best_header_response(sub_best_block);
 							match head_updated {
 								// IF head is updated AND there are still our transactions:
@@ -233,57 +247,53 @@ pub fn run(params: EthereumSyncParams) {
 								},
 							}
 						},
-						Err(error) => log::error!(
-							target: "bridge",
-							"Error retrieving best known header from Substrate node: {:?}",
-							error,
-						),
-					}
+						&mut sub_go_offline_future,
+						|sub_client| delay(CONNECTION_ERROR_DELAY_MS, sub_client),
+						"Error retrieving best known header from Substrate node",
+					);
 				},
 				(sub_client, sub_existence_status) = sub_existence_status_future => {
-					sub_maybe_client = Some(sub_client);
-
-					match sub_existence_status {
-						Ok((sub_header, sub_existence_status)) => eth_sync
+					process_future_result(
+						&mut sub_maybe_client,
+						sub_client,
+						sub_existence_status,
+						|(sub_header, sub_existence_status)| eth_sync
 							.headers_mut()
 							.maybe_orphan_response(&sub_header, sub_existence_status),
-						Err(error) => log::error!(
-							target: "bridge",
-							"Error retrieving existence status from Substrate node: {:?}",
-							error,
-						),
-					}
+						&mut sub_go_offline_future,
+						|sub_client| delay(CONNECTION_ERROR_DELAY_MS, sub_client),
+						"Error retrieving existence status from Substrate node",
+					);
 				},
 				(sub_client, sub_submit_header_result) = sub_submit_header_future => {
-					sub_maybe_client = Some(sub_client);
-
-					match sub_submit_header_result {
-						Ok((_transction_hash, submitted_headers)) => eth_sync
-							.headers_mut()
-							.headers_submitted(submitted_headers),
-						Err(error) => log::error!(
-							target: "bridge",
-							"Error submitting header to Substrate node: {:?}",
-							error,
-						),
-					}
+					process_future_result(
+						&mut sub_maybe_client,
+						sub_client,
+						sub_submit_header_result,
+						|(_, submitted_headers)| eth_sync.headers_mut().headers_submitted(submitted_headers),
+						&mut sub_go_offline_future,
+						|sub_client| delay(CONNECTION_ERROR_DELAY_MS, sub_client),
+						"Error submitting headers to Substrate node",
+					);
 				},
 				(sub_client, sub_receipts_check_result) = sub_receipts_check_future => {
 					// we can minimize number of receipts_check calls by checking header
 					// logs bloom here, but it may give us false positives (when authorities
 					// source is contract, we never need any logs)
-					sub_maybe_client = Some(sub_client);
-
-					match sub_receipts_check_result {
-						Ok((header, receipts_check_result)) => eth_sync
+					process_future_result(
+						&mut sub_maybe_client,
+						sub_client,
+						sub_receipts_check_result,
+						|(header, receipts_check_result)| eth_sync
 							.headers_mut()
 							.maybe_receipts_response(&header, receipts_check_result),
-						Err(error) => log::error!(
-							target: "bridge",
-							"Error retrieving receipts requirement from Substrate node: {:?}",
-							error,
-						),
-					}
+						&mut sub_go_offline_future,
+						|sub_client| delay(CONNECTION_ERROR_DELAY_MS, sub_client),
+						"Error retrieving receipts requirement from Substrate node",
+					);
+				},
+				sub_client = sub_go_offline_future => {
+					sub_maybe_client = Some(sub_client);
 				},
 				_ = sub_tick_stream.next() => {
 					sub_best_block_required = true;
@@ -437,10 +447,40 @@ fn print_progress(
 	(now_time, now_best_header.clone().map(|id| id.0), *now_target_header)
 }
 
-async fn delay(timeout_ms: u64) {
-	async_std::task::sleep(std::time::Duration::from_millis(timeout_ms)).await
+async fn delay<T>(timeout_ms: u64, retval: T) -> T {
+	async_std::task::sleep(std::time::Duration::from_millis(timeout_ms)).await;
+	retval
 }
 
 fn interval(timeout_ms: u64) -> impl futures::Stream<Item = ()> {
-	futures::stream::unfold((), move |_| async move { delay(timeout_ms).await; Some(((), ())) })
+	futures::stream::unfold((), move |_| async move { delay(timeout_ms, ()).await; Some(((), ())) })
+}
+
+fn process_future_result<TClient, TResult, TError, TGoOfflineFuture>(
+	maybe_client: &mut Option<TClient>,
+	client: TClient,
+	result: Result<TResult, TError>,
+	on_success: impl FnOnce(TResult),
+	go_offline_future: &mut std::pin::Pin<&mut futures::future::Fuse<TGoOfflineFuture>>,
+	go_offline: impl FnOnce(TClient) -> TGoOfflineFuture,
+	error_pattern: &'static str,
+) where
+	TError: std::fmt::Debug + MaybeConnectionError,
+	TGoOfflineFuture: FutureExt,
+{
+	match result {
+		Ok(result) => {
+			*maybe_client = Some(client);
+			on_success(result);
+		},
+		Err(error) => {
+			if error.is_connection_error() {
+				go_offline_future.set(go_offline(client).fuse());
+			} else {
+				*maybe_client = Some(client);
+			}
+
+			log::error!(target: "bridge", "{}: {:?}", error_pattern, error);
+		},
+	}
 }

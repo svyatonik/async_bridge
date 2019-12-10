@@ -1,5 +1,3 @@
-// TODO: when connection err happens, take client offline for some time
-
 name: ethsub-bridge
 version: "0.1.0"
 author: Parity Technologies <admin@parity.io>

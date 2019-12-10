@@ -20,6 +20,7 @@ use jsonrpsee_http::{HttpClient, RequestError, http_client};
 use serde_json::{from_value, to_value};
 use sp_core::crypto::Pair;
 use sp_runtime::traits::IdentifyAccount;
+use crate::ethereum_sync_loop::MaybeConnectionError;
 use crate::ethereum_types::{
 	Bytes,
 	H256,
@@ -53,6 +54,15 @@ pub enum Error {
 	ResponseRetrievalFailed(ClientError<RequestError>),
 	/// Failed to parse response.
 	ResponseParseFailed,
+}
+
+impl MaybeConnectionError for Error {
+	fn is_connection_error(&self) -> bool {
+		match *self {
+			Error::StartRequestFailed(_) | Error::ResponseRetrievalFailed(_) => true,
+			_ => false,
+		}
+	}
 }
 
 /// Returns client that is able to call RPCs on Substrate node.
