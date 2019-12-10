@@ -24,6 +24,8 @@ mod ethereum_types;
 mod substrate_client;
 mod substrate_types;
 
+use std::io::Write;
+
 fn main() {
 	initialize();
 
@@ -37,7 +39,39 @@ fn main() {
 }
 
 fn initialize() {
-	env_logger::init();
+	let mut builder = env_logger::Builder::new();
+
+	let filters = match std::env::var("RUST_LOG") {
+		Ok(env_filters) => format!("bridge=info,{}", env_filters),
+		Err(_) => "bridge=info".into(),
+	};
+
+	builder.parse_filters(&filters);
+	builder.format(move |buf, record| {
+		writeln!(buf, "{}", {
+			let timestamp = time::strftime("%Y-%m-%d %H:%M:%S %Z", &time::now())
+				.expect("Time is incorrectly formatted");
+			if cfg!(windows) {
+				format!("{} {} {} {}", timestamp, record.level(), record.target(), record.args())
+			} else {
+				use ansi_term::Colour as Color;
+				let log_level = match record.level() {
+					log::Level::Error => Color::Fixed(9).bold().paint(record.level().to_string()),
+					log::Level::Warn => Color::Fixed(11).bold().paint(record.level().to_string()),
+					log::Level::Info => Color::Fixed(10).paint(record.level().to_string()),
+					log::Level::Debug => Color::Fixed(14).paint(record.level().to_string()),
+					log::Level::Trace => Color::Fixed(12).paint(record.level().to_string()),
+				};
+				format!("{} {} {} {}"
+					, Color::Fixed(8).bold().paint(timestamp)
+					, log_level
+					, Color::Fixed(8).paint(record.target())
+					, record.args())
+			}
+		})
+	});
+
+	builder.init();
 }
 
 fn ethereum_sync_params() -> Result<ethereum_sync_loop::EthereumSyncParams, String> {

@@ -5,6 +5,7 @@ authors = ["Parity Technologies <admin@parity.io>"]
 edition = "2018"
 
 [dependencies]
+ansi_term = "0.9"
 async-std = "1.0.1"
 async-stream = "0.2.0"
 clap = { version = "2.33.0", features = ["yaml"] }
@@ -27,4 +28,5 @@ sp-bridge-eth-poa = { git = "https://github.com/svyatonik/substrate.git", branch
 sp-core = { git = "https://github.com/svyatonik/substrate.git", branch = "bridge_runtime" }
 sp-keyring = { git = "https://github.com/svyatonik/substrate.git", branch = "bridge_runtime" }
 sp-runtime = { git = "https://github.com/svyatonik/substrate.git", branch = "bridge_runtime" }
+time = "0.1"
 web3 = { git = "https://github.com/svyatonik/rust-web3.git", branch = "fix_receipt" }
